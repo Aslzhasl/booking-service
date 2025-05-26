@@ -20,8 +20,8 @@ type CreateBookingRequest struct {
 	DeviceID  string `json:"device_id"`
 	UserID    string `json:"user_id"`
 	OwnerID   string `json:"owner_id"`
-	StartDate string `json:"start_date"`
-	EndDate   string `json:"end_date"`
+	StartTime string `json:"start_time"`
+	EndTime   string `json:"end_time"`
 }
 
 // Проверка, что сущность существует (200 OK)
@@ -63,8 +63,8 @@ func (h *BookingHandler) CreateBooking(w http.ResponseWriter, r *http.Request) {
 		DeviceID:  req.DeviceID,
 		UserID:    req.UserID,
 		OwnerID:   req.OwnerID,
-		StartDate: req.StartDate,
-		EndDate:   req.EndDate,
+		StartTime: req.StartTime,
+		EndTime:   req.EndTime,
 		Status:    "active",
 		CreatedAt: time.Now().Format(time.RFC3339),
 	}

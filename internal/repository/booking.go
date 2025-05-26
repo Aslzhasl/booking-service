@@ -16,8 +16,8 @@ func NewBookingRepository(db *sqlx.DB) *BookingRepository {
 
 func (r *BookingRepository) CreateBooking(ctx context.Context, b *model.Booking) error {
 	_, err := r.DB.NamedExecContext(ctx, `
-		INSERT INTO bookings (id, device_id, user_id, owner_id, start_date, end_date, status, created_at)
-		VALUES (:id, :device_id, :user_id, :owner_id, :start_date, :end_date, :status, :created_at)
+		INSERT INTO bookings (id, device_id, user_id, owner_id, start_time, end_time, status, created_at)
+		VALUES (:id, :device_id, :user_id, :owner_id, :start_time, :end_time, :status, :created_at)
 	`, b)
 	return err
 }

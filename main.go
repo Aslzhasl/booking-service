@@ -13,7 +13,7 @@ import (
 func main() {
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
-		dbURL = "postgres://postgres:1234@localhost:5432/Booking-service?sslmode=disable"
+		dbURL = "postgres://postgres:1234@34.45.98.93:5432/Booking-service?sslmode=disable"
 	}
 	db, err := sqlx.Connect("postgres", dbURL)
 	if err != nil {
