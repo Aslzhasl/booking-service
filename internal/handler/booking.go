@@ -1,234 +1,222 @@
+// internal/handler/booking.go
+
 package handler
 
 import (
-	"booking-service/internal/model"
-	"booking-service/internal/repository"
 	"encoding/json"
-	"fmt"
-	"github.com/google/uuid"
+	"log"
 	"net/http"
-	"strings"
 	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
+
+	"booking-service/internal/service"
 )
 
 type BookingHandler struct {
-	Repo             *repository.BookingRepository
-	UserServiceURL   string
-	DeviceServiceURL string
+	svc *service.BookingService
 }
 
-type CreateBookingRequest struct {
-	DeviceID  string `json:"device_id"`
-	UserID    string `json:"user_id"`
-	OwnerID   string `json:"owner_id"`
-	StartTime string `json:"start_time"`
-	EndTime   string `json:"end_time"`
+func NewBookingHandler(svc *service.BookingService) *BookingHandler {
+	return &BookingHandler{svc: svc}
 }
 
-// Проверка, что сущность существует (200 OK)
-//
-//	func existsInService(url string) bool {
-//		resp, err := http.Get(url)
-//		if err != nil {
-//			return false
-//		}
-//		defer resp.Body.Close()
-//		return resp.StatusCode == http.StatusOK
-//	}
-func (h *BookingHandler) CreateBooking(w http.ResponseWriter, r *http.Request) {
-	var req CreateBookingRequest
+func (h *BookingHandler) RegisterRoutes(r chi.Router) {
+	r.Route("/bookings", func(r chi.Router) {
+		r.Post("/", h.createBooking)                     // POST   /bookings
+		r.Get("/{bookingID}", h.getBookingByID)          // GET    /bookings/{bookingID}
+		r.Get("/user/{userID}", h.listBookingsByUser)    // GET    /bookings/user/{userID}
+		r.Get("/available", h.checkAvailabilityInterval) // GET    /bookings/available?listing_id=...&start=...&end=...
+		r.Get("/availability/{listingID}", h.getDailyAvailability)
+		r.Get("/available/{listingID}", h.checkAvailabilityAt) // GET    /bookings/available/{listingID}?at=...
+	})
+}
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid input", http.StatusBadRequest)
+// createBooking обрабатывает POST /bookings
+func (h *BookingHandler) createBooking(w http.ResponseWriter, r *http.Request) {
+	// 1) Извлекаем заголовок Authorization
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		http.Error(w, "Missing Authorization header", http.StatusUnauthorized)
 		return
 	}
-	if req.UserID == req.OwnerID {
-		http.Error(w, "user_id and owner_id must be different", http.StatusBadRequest)
+	log.Printf("DEBUG: incoming Authorization header = %q\n", authHeader)
+
+	// 2) Читаем тело запроса
+	var reqBody struct {
+		ListingID string `json:"listing_id"`
+		UserID    string `json:"user_id"`
+		OwnerID   string `json:"owner_id"`
+		StartTime string `json:"start_time"`
+		EndTime   string `json:"end_time"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+		http.Error(w, "Invalid JSON body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	booked, err := h.Repo.IsDeviceBooked(r.Context(), req.DeviceID, req.StartTime, req.EndTime)
+
+	// 3) Парсим даты в time.Time (RFC3339)
+	start, err := time.Parse(time.RFC3339, reqBody.StartTime)
 	if err != nil {
-		http.Error(w, "error checking availability: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Invalid start_time format (RFC3339 expected)", http.StatusBadRequest)
 		return
 	}
-	if booked {
-		http.Error(w, "device is already booked for these dates", http.StatusConflict)
-		return
-	}
-
-	// JWT из оригинального запроса
-	jwtToken := r.Header.Get("Authorization")
-	if jwtToken != "" && len(jwtToken) > 7 && jwtToken[:7] == "Bearer " {
-		jwtToken = jwtToken[7:] // Убираем Bearer
-	}
-
-	deviceURL := fmt.Sprintf("%s/api/devices/%s", h.DeviceServiceURL, req.DeviceID)
-	userURL := fmt.Sprintf("%s/api/users/%s", h.UserServiceURL, req.UserID)
-
-	deviceExists, deviceStatus := existsInService(deviceURL, jwtToken)
-	if !deviceExists {
-		if deviceStatus == http.StatusUnauthorized {
-			http.Error(w, "invalid or expired token", http.StatusUnauthorized)
-			return
-		}
-		if deviceStatus == http.StatusNotFound {
-			http.Error(w, "device not found", http.StatusNotFound)
-			return
-		}
-		http.Error(w, "error checking device", http.StatusInternalServerError)
+	end, err := time.Parse(time.RFC3339, reqBody.EndTime)
+	if err != nil {
+		http.Error(w, "Invalid end_time format (RFC3339 expected)", http.StatusBadRequest)
 		return
 	}
 
-	userExists, userStatus := existsInService(userURL, jwtToken)
-	if !userExists {
-		if userStatus == http.StatusUnauthorized {
-			http.Error(w, "invalid or expired token", http.StatusUnauthorized)
-			return
-		}
-		if userStatus == http.StatusNotFound {
-			http.Error(w, "user not found", http.StatusNotFound)
-			return
-		}
-		http.Error(w, "error checking user", http.StatusInternalServerError)
+	// 4) Проверяем, что userID и ownerID имеют корректный UUID-формат
+	if _, err := uuid.Parse(reqBody.UserID); err != nil {
+		http.Error(w, "Invalid user_id", http.StatusBadRequest)
+		return
+	}
+	if _, err := uuid.Parse(reqBody.OwnerID); err != nil {
+		http.Error(w, "Invalid owner_id", http.StatusBadRequest)
 		return
 	}
 
-	booking := model.Booking{
-		ID:        uuid.New().String(),
-		DeviceID:  req.DeviceID,
-		UserID:    req.UserID,
-		OwnerID:   req.OwnerID,
-		StartTime: req.StartTime,
-		EndTime:   req.EndTime,
-		Status:    "active",
-		CreatedAt: time.Now().Format(time.RFC3339),
+	// 5) Готовим запрос для сервисного слоя, пробрасывая authHeader
+	svcReq := &service.CreateBookingRequest{
+		ListingID:  reqBody.ListingID, // treated as plain string (text)
+		UserID:     reqBody.UserID,
+		OwnerID:    reqBody.OwnerID,
+		StartTime:  start,
+		EndTime:    end,
+		AuthHeader: authHeader, // "Bearer <token>"
 	}
-	if err := h.Repo.CreateBooking(r.Context(), &booking); err != nil {
-		// Показываем ошибку и в http ответе, и в консоль
-		http.Error(w, "failed to create booking: "+err.Error(), http.StatusInternalServerError)
-		fmt.Println("FAILED TO CREATE BOOKING:", err)
+
+	booking, err := h.svc.CreateBooking(r.Context(), svcReq)
+	if err != nil {
+		http.Error(w, "Could not create booking: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(booking)
 }
-func (h *BookingHandler) GetAllBookings(w http.ResponseWriter, r *http.Request) {
-	bookings, err := h.Repo.GetAllBookings(r.Context())
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	json.NewEncoder(w).Encode(bookings)
-}
 
-// --- GET /bookings/{id}
-func (h *BookingHandler) GetBookingByID(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimPrefix(r.URL.Path, "/bookings/")
-	booking, err := h.Repo.GetBookingByID(r.Context(), id)
-	if err != nil {
-		http.Error(w, "booking not found", http.StatusNotFound)
+// getBookingByID обрабатывает GET /bookings/{bookingID}
+func (h *BookingHandler) getBookingByID(w http.ResponseWriter, r *http.Request) {
+	bookingID := chi.URLParam(r, "bookingID")
+	if _, err := uuid.Parse(bookingID); err != nil {
+		http.Error(w, "Invalid booking ID", http.StatusBadRequest)
 		return
 	}
+
+	booking, err := h.svc.GetBookingByID(r.Context(), bookingID)
+	if err != nil {
+		http.Error(w, "Booking not found: "+err.Error(), http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(booking)
 }
 
-// --- PUT /bookings/{id}
-func (h *BookingHandler) UpdateBooking(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimPrefix(r.URL.Path, "/bookings/")
-	var b model.Booking
-	if err := json.NewDecoder(r.Body).Decode(&b); err != nil {
-		http.Error(w, "invalid input", http.StatusBadRequest)
+// listBookingsByUser обрабатывает GET /bookings/user/{userID}
+func (h *BookingHandler) listBookingsByUser(w http.ResponseWriter, r *http.Request) {
+	userID := chi.URLParam(r, "userID")
+	if _, err := uuid.Parse(userID); err != nil {
+		http.Error(w, "Invalid user ID", http.StatusBadRequest)
 		return
 	}
-	b.ID = id
-	if err := h.Repo.UpdateBooking(r.Context(), &b); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	json.NewEncoder(w).Encode(b)
-}
 
-// --- PATCH /bookings/{id} (частичное обновление, например, только статус)
-type PatchBookingRequest struct {
-	Status string `json:"status"`
-}
-
-func (h *BookingHandler) PatchBooking(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimPrefix(r.URL.Path, "/bookings/")
-	var req PatchBookingRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid input", http.StatusBadRequest)
-		return
-	}
-	booking, err := h.Repo.GetBookingByID(r.Context(), id)
+	list, err := h.svc.ListBookingsByUser(r.Context(), userID)
 	if err != nil {
-		http.Error(w, "booking not found", http.StatusNotFound)
+		http.Error(w, "Error fetching bookings: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	booking.Status = req.Status
-	if err := h.Repo.UpdateBooking(r.Context(), booking); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	json.NewEncoder(w).Encode(booking)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(list)
 }
 
-// --- DELETE /bookings/{id}
-func (h *BookingHandler) DeleteBooking(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimPrefix(r.URL.Path, "/bookings/")
-	if err := h.Repo.DeleteBooking(r.Context(), id); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+// checkAvailabilityInterval обрабатывает GET /bookings/available?listing_id=...&start=...&end=...
+func (h *BookingHandler) checkAvailabilityInterval(w http.ResponseWriter, r *http.Request) {
+	listingID := r.URL.Query().Get("listing_id")
+	startStr := r.URL.Query().Get("start")
+	endStr := r.URL.Query().Get("end")
+
+	if listingID == "" || startStr == "" || endStr == "" {
+		http.Error(w, "Missing listing_id, start or end query parameters", http.StatusBadRequest)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
-}
 
-func existsInService(url string, jwtToken string) (bool, int) {
-	req, err := http.NewRequest("GET", url, nil)
+	// Парсим даты
+	start, err := time.Parse(time.RFC3339, startStr)
 	if err != nil {
-		return false, 0
+		http.Error(w, "Invalid start format (RFC3339 expected)", http.StatusBadRequest)
+		return
 	}
-	if jwtToken != "" {
-		req.Header.Set("Authorization", "Bearer "+jwtToken)
-	}
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	end, err := time.Parse(time.RFC3339, endStr)
 	if err != nil {
-		return false, 0
-	}
-	defer resp.Body.Close()
-	return resp.StatusCode == http.StatusOK, resp.StatusCode
-}
-
-func extractToken(header string) string {
-	if strings.HasPrefix(header, "Bearer ") {
-		return header[7:]
-	}
-	return header
-}
-
-func (h *BookingHandler) GetBookedSlots(w http.ResponseWriter, r *http.Request) {
-	// Получаем device_id из URL
-	deviceID := strings.TrimPrefix(r.URL.Path, "/api/devices/")
-	deviceID = strings.Split(deviceID, "/")[0]
-
-	date := r.URL.Query().Get("date")
-	if date == "" {
-		http.Error(w, "date query param required", http.StatusBadRequest)
+		http.Error(w, "Invalid end format (RFC3339 expected)", http.StatusBadRequest)
 		return
 	}
 
-	slots, err := h.Repo.GetBookedSlotsByDeviceAndDate(r.Context(), deviceID, date)
+	available, err := h.svc.IsAvailableInterval(r.Context(), listingID, start, end)
 	if err != nil {
-		http.Error(w, "failed to fetch booked slots: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "Error checking availability: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"available": available})
+}
+
+// checkAvailabilityAt обрабатывает GET /bookings/available/{listingID}?at=...
+func (h *BookingHandler) checkAvailabilityAt(w http.ResponseWriter, r *http.Request) {
+	listingID := chi.URLParam(r, "listingID")
+	atStr := r.URL.Query().Get("at")
+
+	if listingID == "" || atStr == "" {
+		http.Error(w, "Missing listingID or 'at' query parameter", http.StatusBadRequest)
+		return
+	}
+
+	timePoint, err := time.Parse(time.RFC3339, atStr)
+	if err != nil {
+		http.Error(w, "Invalid 'at' format (RFC3339 expected)", http.StatusBadRequest)
+		return
+	}
+
+	available, err := h.svc.IsAvailableAtMoment(r.Context(), listingID, timePoint)
+	if err != nil {
+		http.Error(w, "Error checking availability: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]bool{"available": available})
+}
+func (h *BookingHandler) getDailyAvailability(w http.ResponseWriter, r *http.Request) {
+	listingID := chi.URLParam(r, "listingID")
+	dateStr := r.URL.Query().Get("date")
+	if dateStr == "" {
+		http.Error(w, "Missing 'date' query parameter", http.StatusBadRequest)
+		return
+	}
+
+	// Проверим формат dateStr: "YYYY-MM-DD"
+	if _, err := time.Parse("2006-01-02", dateStr); err != nil {
+		http.Error(w, "Invalid date format (expected YYYY-MM-DD)", http.StatusBadRequest)
+		return
+	}
+
+	hoursMap, err := h.svc.DailyAvailability(r.Context(), listingID, dateStr)
+	if err != nil {
+		http.Error(w, "Error getting availability: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Формируем ответ
 	resp := map[string]interface{}{
-		"device_id":    deviceID,
-		"date":         date,
-		"booked_slots": slots,
+		"date":  dateStr,
+		"hours": hoursMap,
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
