@@ -24,6 +24,7 @@ func NewBookingHandler(svc *service.BookingService) *BookingHandler {
 
 func (h *BookingHandler) RegisterRoutes(r chi.Router) {
 	r.Route("/bookings", func(r chi.Router) {
+		r.Get("/", h.listAllBookings)
 		r.Post("/", h.createBooking)                     // POST   /bookings
 		r.Get("/{bookingID}", h.getBookingByID)          // GET    /bookings/{bookingID}
 		r.Get("/user/{userID}", h.listBookingsByUser)    // GET    /bookings/user/{userID}
@@ -220,4 +221,14 @@ func (h *BookingHandler) getDailyAvailability(w http.ResponseWriter, r *http.Req
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
+}
+func (h *BookingHandler) listAllBookings(w http.ResponseWriter, r *http.Request) {
+	bookings, err := h.svc.ListAllBookings(r.Context())
+	if err != nil {
+		http.Error(w, "Error fetching all bookings: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(bookings)
 }

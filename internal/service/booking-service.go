@@ -216,3 +216,10 @@ func (s *BookingService) DailyAvailability(ctx context.Context, listingID, dateS
 	// 5. Вернём итоговую карту
 	return hourMap, nil
 }
+func (s *BookingService) ListAllBookings(ctx context.Context) ([]model.Booking, error) {
+	bookings, err := s.repo.ListAllBookings(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("error fetching all bookings: %w", err)
+	}
+	return bookings, nil
+}

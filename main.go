@@ -16,6 +16,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
+	"github.com/rs/cors" // Вот эта библиотека для CORS!
 )
 
 func main() {
@@ -44,20 +45,29 @@ func main() {
 	bookingHandler := handler.NewBookingHandler(bookingSvc)
 
 	r := chi.NewRouter()
+
+	// 🔥 Добавляем CORS middleware
+	c := cors.New(cors.Options{
+		AllowedOrigins:   []string{"http://localhost:63342"}, // Swagger UI
+		AllowedHeaders:   []string{"Authorization", "Content-Type"},
+		AllowCredentials: true,
+	})
+	r.Use(c.Handler) // 👈 Вот здесь он цепляется
+
+	// JWT middleware + маршруты
 	r.Group(func(r chi.Router) {
 		r.Use(func(next http.Handler) http.Handler {
 			return middleware.JWTAuthMiddleware(next, cfg.JWTSecret)
 		})
 		bookingHandler.RegisterRoutes(r)
 	})
+
 	r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status":"ok"}`))
 	})
 
-	// 3) Определяем, на каком порту слушать:
-	//    а) локально мы могли задать HTTP_PORT (например, 8082),
-	//    б) в Cloud Run придёт переменная PORT=8080.
+	// 3) Определяем порт
 	port := os.Getenv("HTTP_PORT")
 	if port == "" {
 		port = os.Getenv("PORT")

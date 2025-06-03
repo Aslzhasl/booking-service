@@ -119,3 +119,12 @@ func (r *BookingRepository) ListByListingAndDate(ctx context.Context, listingID 
 	}
 	return list, nil
 }
+
+func (r *BookingRepository) ListAllBookings(ctx context.Context) ([]model.Booking, error) {
+	var bookings []model.Booking
+	query := "SELECT * FROM bookings ORDER BY created_at DESC"
+	if err := r.db.SelectContext(ctx, &bookings, query); err != nil {
+		return nil, fmt.Errorf("BookingRepository.ListAllBookings: %w", err)
+	}
+	return bookings, nil
+}
